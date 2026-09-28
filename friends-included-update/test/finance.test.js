@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {sale,expense,commissions,results,requireManager} from '../lib/rules.js';
+import {approve,sheetValues,decisionText} from '../lib/services.js';
+const s=(ref,project,amount,shares,status='Approved')=>({...sale({reference:ref,customer:'Test customer',description:'Delivered service',project,amount,shares},'richard'),approved_shares:status==='Approved'?shares:null,status});
+const e=(ref,amount,proposal,final=null)=>({...expense({reference:ref,amount,description:'Paid expense',category:'Other',proposed_allocation:proposal},'kevin'),final_allocation:final});
+test('both homework control totals and reconciliation',()=>{
+ const sales=[s('S01','A',1000,[50,30,20]),s('S02','B',2000,[20,40,40])];
+ const expenses=[e('E01',120,'A','A'),e('E02',80,'B','A'),e('E03',100,'Company overhead','Company overhead')];
+ const pending=results(sales.map(x=>({...x,status:'Pending approval',approved_shares:null})),expenses.map(x=>({...x,final_allocation:x.proposed_allocation==='Company overhead'?'Company overhead':null})));
+ assert.equal(pending.company.result,-30000);assert.equal(pending.A.result,0);assert.equal(pending.B.result,0);
+ let t=results(sales,expenses);assert.equal(t.A.result,70000);assert.equal(t.B.result,180000);assert.equal(t.company.result,240000);assert.deepEqual(t.earned,[9000,11000,10000]);
+ sales.push(s('S03','A',1500,[20,30,50]),s('S04','B',800,[25,25,50]),s('S05','B',600,[100,0,0],'Pending approval'));
+ expenses.push(e('E04',250,'B','B'),e('E05',90,'A','B'),e('E06',60,'Company overhead','Company overhead'),e('E07',140,'A'));
+ t=results(sales,expenses);assert.equal(t.A.result,205000);assert.equal(t.B.result,218000);assert.equal(t.company.result,393000);assert.deepEqual(t.earned,[14000,17500,21500]);assert.equal(t.pendingSales,60000);assert.equal(t.overhead,16000);assert.equal(t.awaiting,14000);assert.equal(t.A.result+t.B.result-t.overhead-t.awaiting,t.company.result);
+});
+test('pool rounding reconciles with largest share and tie order',()=>{assert.deepEqual(commissions(105,[50,50,0]),{pool:11,earned:[5,6,0]});assert.deepEqual(commissions(100,[33.33,33.33,33.34]),{pool:10,earned:[3,3,4]});for(let cents=1;cents<1000;cents++){const c=commissions(cents,[25,25,50]);assert.equal(c.earned.reduce((a,b)=>a+b,0),c.pool);}});
+test('expenses enforce reporter, amount, category and allocation',()=>{const input={reference:'E01',description:'Taxi',amount:80,category:'Travel',proposed_allocation:'A'};assert.throws(()=>expense(input,'richard'));for(const amount of [0,-1,''])assert.throws(()=>expense({...input,amount},'kevin'));assert.throws(()=>expense({...input,category:'Commission'},'kevin'));assert.equal(expense({...input,proposed_allocation:'Company overhead'},'kevin').status,'Allocated');assert.equal(expense(input,'kevin').final_allocation,null);});
+test('pending and approved sheet rows preserve proposals and commissions',()=>{const pending=s('S02','B',2000,[0,50,50],'Pending approval');assert.deepEqual(sheetValues(pending,'sales').slice(10,16),['','','',0,0,0]);const approved={...pending,status:'Approved',approved_shares:[20,40,40]};assert.deepEqual(sheetValues(approved,'sales').slice(7,16),[0,50,50,20,40,40,40,80,80]);assert.match(decisionText(approved,'sales'),/split changed/);assert.match(decisionText(approved,'sales'),/Richard: 0% → 20% \(€40.00\)/);});
+test('processing layer denies non-manager approvals and repeated approval has no writes',async()=>{const row=s('S01','A',1000,[50,30,20]);assert.throws(()=>requireManager('richard'));await assert.rejects(()=>approve(row,'sales',{shares:[100,0,0]},'richard'));const original=global.fetch;let called=false;global.fetch=async()=>{called=true;throw Error('Unexpected write');};try{await approve(row,'sales',{shares:[100,0,0]},'svetlana');assert.equal(called,false);}finally{global.fetch=original;}});
